@@ -52,9 +52,14 @@ options:
             - Password for the sftp connection
         required: true
         type: str
+    private_key:
+        description:
+            - Private key for the sftp connection
+        required: false
+        type: path
 
 requirements:
-    pysftp>=0.2.9
+    paramiko>=2.7.2
 
 author:
     - Konstantinos Georgoudis (@tsimouha)
@@ -82,41 +87,82 @@ from ansible.module_utils.basic import missing_required_lib
 LIB_IMP_ERR = None
 try:
     import paramiko
+
     PARAMIKO_AVAILABLE = True
 except ImportError:
     PARAMIKO_AVAILABLE = False
     LIB_IMP_ERR = traceback.format_exc()
 
 
+def create_sftp_session(module, host, username, password, port, private_key_path, private_key_type):
+    try:
+        if private_key_path is not None:
+            if private_key_path == 'DSA':
+                key = paramiko.DSSKey.from_private_key_file(private_key_path)
+            else:
+                key = paramiko.RSAKey.from_private_key(private_key_path)
+        else:
+            password = password
+
+        transport = paramiko.Transport(host, port)
+        transport.connect(None, username, password, key)
+
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        return sftp
+
+    except Exception as e:
+        module.fail_json(msg="Failed to connect on remote sftp host: %s" % e)
+        if sftp is not None:
+            sftp.close()
+        if transport is not None:
+            transport.close()
+        pass
+
+
 def main():
     module = AnsibleModule(
         argument_spec=dict(
-            path=dict(type='path', required=True),
+            path=dict(type='list', required=True, aliases=['name', 'path'], elements='str'),
             pattern=dict(type='str', required=True),
             host=dict(type='str', required=True),
             port=dict(type='int', required=True),
             username=dict(type='str', required=True),
-            password=dict(type='str', no_log=True, required=True)
+            method=dict(type='str', choices=['password', 'private_key'], required=True),
+            password=dict(type='str', no_log=True, required=True),
+            private_key_path=dict(type='path', required=False),
+            private_key_type=dict(type='str', choices=['DSA', 'RSA']),
         ),
-        supports_check_mode=True
+        supports_check_mode=True,
+        required_if=[
+            ('method', 'password', 'password', True),
+            ('method', 'private_key', ('private_key_path','private_key_type'), True),
+        ],
     )
 
-    path = module.params['path']
-    pattern = module.params['pattern']
-    host = module.params['host']
-    port = module.params['port']
-    username = module.params['username']
-    password = module.params['password']
+    params = module.params
 
-    files_found = []
-    file_names = []
+    msg = ''
+    looked = 0
+    filelist = []
+
+    path = params['path']
+    pattern = params['pattern']
+    host = params['host']
+    port = params['port']
+    username = params['username']
+    password = params['password']
+    private_key_path = params['private_key_path']
+    private_key_type = params['private_key_type']
 
     if not PARAMIKO_AVAILABLE:
         module.fail_json(msg=missing_required_lib("paramiko"), exception=LIB_IMP_ERR)
 
-    #TODO: Connect function
+    sftp = create_sftp_session(host, username, password, port, private_key_path, private_key_type)
+    dirlist = sftp.listdir(path)
+    for file in dirlist:
+        filelist.append(file)
 
-    module.exit_json(files_found=files_found, file_names=file_names, changed=changed)
+    module.exit_json(files=filelist, changed=False, msg=msg, examined=looked)
 
 
 if __name__ == '__main__':
